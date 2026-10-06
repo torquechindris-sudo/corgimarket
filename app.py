@@ -6,6 +6,7 @@ import secrets
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from flask import (Flask, abort, flash, g, jsonify, redirect, render_template,
                    request, session, url_for)
@@ -14,35 +15,32 @@ from werkzeug.security import check_password_hash, generate_password_hash
 import lmsr
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+# Hosted (Vercel): DATABASE_URL points at Postgres. Local: data lives in data/market.db.
+DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")
+if os.environ.get("VERCEL") and not DATABASE_URL:
+    raise RuntimeError("No database connected. In the Vercel dashboard: Storage -> Create Database -> Neon, "
+                       "connect it to this project, then redeploy.")
 DATA = os.environ.get("CORGI_DATA", os.path.join(BASE, "data"))
-os.makedirs(DATA, exist_ok=True)
 DB_PATH = os.path.join(DATA, "market.db")
+TZ = ZoneInfo(os.environ.get("TIMEZONE", "America/New_York"))
 EPS = 1e-6
 SITE_NAME = os.environ.get("CORGI_SITE_NAME", "Corgi Markets")
 
-
-def _secret_key():
-    path = os.path.join(DATA, "secret_key")
-    if not os.path.exists(path):
-        with open(path, "w") as f:
-            f.write(secrets.token_hex(32))
-    with open(path) as f:
-        return f.read().strip()
-
-
-app = Flask(__name__)
-app.secret_key = _secret_key()
+app = Flask(__name__, static_folder="public/static", static_url_path="/static")
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+                  SESSION_COOKIE_SECURE=bool(os.environ.get("VERCEL")),
                   PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 30)
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS users(
   id INTEGER PRIMARY KEY,
-  username TEXT UNIQUE NOT NULL COLLATE NOCASE,
+  username TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
   is_admin INTEGER NOT NULL DEFAULT 0,
   balance INTEGER NOT NULL DEFAULT 0,          -- cents
   created_at TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_users_lower ON users(lower(username));
 CREATE TABLE IF NOT EXISTS invites(
   code TEXT PRIMARY KEY, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
   used_by INTEGER REFERENCES users(id), used_at TEXT);
@@ -82,6 +80,7 @@ CREATE TABLE IF NOT EXISTS trades(
   price_before REAL NOT NULL, price_after REAL NOT NULL,
   created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS price_history(
+  id INTEGER PRIMARY KEY,
   contract_id INTEGER NOT NULL REFERENCES contracts(id),
   price REAL NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ledger(
@@ -104,15 +103,54 @@ CREATE INDEX IF NOT EXISTS ix_trades_contract ON trades(contract_id);
 CREATE INDEX IF NOT EXISTS ix_history_contract ON price_history(contract_id);
 CREATE INDEX IF NOT EXISTS ix_ledger_user ON ledger(user_id);
 """
+# Same schema with Postgres types (REAL is only 4 bytes there; prices need 8)
+PG_SCHEMA = (SCHEMA.replace("id INTEGER PRIMARY KEY", "id SERIAL PRIMARY KEY")
+             .replace(" REAL ", " DOUBLE PRECISION "))
 
 
 # ---------------------------------------------------------------- db helpers
+# Both backends share one tiny interface: execute(sql, args) with "?" placeholders,
+# and rows readable by column name or by index.
+
+class Row(dict):
+    def __init__(self, cols, vals):
+        super().__init__(zip(cols, vals))
+        self._vals = vals
+
+    def __getitem__(self, key):
+        return self._vals[key] if isinstance(key, int) else super().__getitem__(key)
+
+
+def _pg_rows(cursor):
+    cols = [c.name for c in cursor.description or []]
+    return lambda values: Row(cols, values)
+
+
+class PgConn:
+    def __init__(self):
+        import psycopg
+        # prepare_threshold=None: server-side prepared statements break behind Neon's connection pooler
+        self.conn = psycopg.connect(DATABASE_URL, autocommit=True, prepare_threshold=None, row_factory=_pg_rows)
+
+    def execute(self, sql, args=()):
+        return self.conn.execute(sql.replace("?", "%s"), args)
+
+    def executemany(self, sql, seq):
+        with self.conn.cursor() as cur:
+            cur.executemany(sql.replace("?", "%s"), seq)
+
+    def close(self):
+        self.conn.close()
+
 
 def db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH, isolation_level=None, timeout=15)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys=ON")
+        if DATABASE_URL:
+            g.db = PgConn()
+        else:
+            g.db = sqlite3.connect(DB_PATH, isolation_level=None, timeout=15)
+            g.db.row_factory = sqlite3.Row
+            g.db.execute("PRAGMA foreign_keys=ON")
     return g.db
 
 
@@ -124,13 +162,38 @@ def _close_db(exc):
 
 
 def init_db():
+    """Create missing tables; return the session-signing secret (generated once, kept in the db)."""
+    new_secret = secrets.token_hex(32)
+    if DATABASE_URL:
+        import psycopg
+        with psycopg.connect(DATABASE_URL, autocommit=True, prepare_threshold=None) as conn:
+            with conn.transaction():
+                conn.execute("SELECT pg_advisory_xact_lock(7231)")  # concurrent cold starts
+                conn.execute(PG_SCHEMA)
+                conn.execute("INSERT INTO settings(key, value) VALUES ('secret_key', %s) ON CONFLICT DO NOTHING",
+                             (new_secret,))
+            return conn.execute("SELECT value FROM settings WHERE key = 'secret_key'").fetchone()[0]
+    os.makedirs(DATA, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(price_history)")]
+    old_history = bool(cols) and "id" not in cols  # created before price_history had an id column
+    if old_history:
+        conn.execute("ALTER TABLE price_history RENAME TO price_history_old")
     conn.executescript(SCHEMA)
+    if old_history:
+        conn.executescript("INSERT INTO price_history(id, contract_id, price, created_at) "
+                           "SELECT rowid, contract_id, price, created_at FROM price_history_old; "
+                           "DROP TABLE price_history_old;")
+    conn.execute("INSERT INTO settings(key, value) VALUES ('secret_key', ?) ON CONFLICT DO NOTHING", (new_secret,))
+    conn.commit()
+    secret = conn.execute("SELECT value FROM settings WHERE key = 'secret_key'").fetchone()[0]
     conn.close()
+    return secret
 
 
-init_db()
+_stored_secret = init_db()
+app.secret_key = os.environ.get("SECRET_KEY") or _stored_secret
 
 
 class UserError(Exception):
@@ -141,7 +204,11 @@ class UserError(Exception):
 def tx():
     """Serialized write transaction; any exception rolls everything back."""
     d = db()
-    d.execute("BEGIN IMMEDIATE")
+    if DATABASE_URL:
+        d.execute("BEGIN")
+        d.execute("SELECT pg_advisory_xact_lock(7232)")  # one writer at a time, like SQLite
+    else:
+        d.execute("BEGIN IMMEDIATE")
     try:
         yield d
         d.execute("COMMIT")
@@ -151,7 +218,7 @@ def tx():
 
 
 def now():
-    return datetime.now().replace(microsecond=0).isoformat(sep=" ")
+    return datetime.now(TZ).replace(microsecond=0, tzinfo=None).isoformat(sep=" ")
 
 
 def one(sql, *args):
@@ -234,11 +301,13 @@ def setup():
             flash("Password must be at least 8 characters", "error")
         else:
             with tx() as d:
-                cur = d.execute("INSERT INTO users(username, password_hash, is_admin, created_at) VALUES (?,?,1,?)",
-                                (name, generate_password_hash(pw), now()))
+                if d.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+                    return redirect(url_for("login"))
+                uid = d.execute("INSERT INTO users(username, password_hash, is_admin, created_at) VALUES (?,?,1,?) "
+                                "RETURNING id", (name, generate_password_hash(pw), now())).fetchone()[0]
             session.clear()
             session.permanent = True
-            session["uid"] = cur.lastrowid
+            session["uid"] = uid
             flash("Admin account created. Invite your friends from the Admin page.", "ok")
             return redirect(url_for("admin"))
     return render_template("setup.html")
@@ -247,7 +316,7 @@ def setup():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        u = one("SELECT * FROM users WHERE username = ?", request.form.get("username", "").strip())
+        u = one("SELECT * FROM users WHERE lower(username) = lower(?)", request.form.get("username", "").strip())
         if u and check_password_hash(u["password_hash"], request.form.get("password", "")):
             session.clear()
             session.permanent = True
@@ -278,16 +347,16 @@ def join(code):
             if len(pw) < 8:
                 raise UserError("Password must be at least 8 characters")
             with tx() as d:
-                if d.execute("SELECT 1 FROM users WHERE username = ?", (name,)).fetchone():
+                if d.execute("SELECT 1 FROM users WHERE lower(username) = lower(?)", (name,)).fetchone():
                     raise UserError("That username is taken")
                 if not d.execute("SELECT 1 FROM invites WHERE code = ? AND used_by IS NULL", (code,)).fetchone():
                     raise UserError("This invite was just used")
-                cur = d.execute("INSERT INTO users(username, password_hash, created_at) VALUES (?,?,?)",
-                                (name, generate_password_hash(pw), now()))
-                d.execute("UPDATE invites SET used_by = ?, used_at = ? WHERE code = ?", (cur.lastrowid, now(), code))
+                uid = d.execute("INSERT INTO users(username, password_hash, created_at) VALUES (?,?,?) RETURNING id",
+                                (name, generate_password_hash(pw), now())).fetchone()[0]
+                d.execute("UPDATE invites SET used_by = ?, used_at = ? WHERE code = ?", (uid, now(), code))
             session.clear()
             session.permanent = True
-            session["uid"] = cur.lastrowid
+            session["uid"] = uid
             flash(f"Welcome, {name}! Send money to the admin to get your balance funded.", "ok")
             return redirect(url_for("index"))
         except UserError as e:
@@ -510,7 +579,7 @@ def market(mid):
         mine.setdefault(pos["contract_id"], []).append(pos)
     history = {}
     for c in cs:
-        pts = all_("SELECT price, created_at FROM price_history WHERE contract_id = ? ORDER BY rowid", c["id"])
+        pts = all_("SELECT price, created_at FROM price_history WHERE contract_id = ? ORDER BY id", c["id"])
         history[c["id"]] = [[r["created_at"], round(r["price"], 4)] for r in pts][-300:]
     trades = all_("SELECT t.*, u.username, c.name AS cname FROM trades t JOIN users u ON u.id = t.user_id "
                   "JOIN contracts c ON c.id = t.contract_id WHERE c.market_id = ? ORDER BY t.id DESC LIMIT 40", mid)
@@ -585,8 +654,8 @@ def trade():
                     raise UserError(f"Not enough balance ({money(balance)} available)")
                 r = compute_trade(m, cs, c, side, "buy", amount_cents=amount)
                 d.execute("INSERT INTO positions(user_id, contract_id, side, shares, basis, net) VALUES (?,?,?,?,?,?) "
-                          "ON CONFLICT(user_id, contract_id, side) DO UPDATE SET shares = shares + excluded.shares, "
-                          "basis = basis + excluded.basis, net = net + excluded.net",
+                          "ON CONFLICT(user_id, contract_id, side) DO UPDATE SET shares = positions.shares + excluded.shares, "
+                          "basis = positions.basis + excluded.basis, net = positions.net + excluded.net",
                           (uid, cid, side, r["shares"], amount, amount))
             else:
                 held = pos["shares"] if pos else 0
@@ -855,9 +924,9 @@ def admin_new_market():
             if kind == "exclusive" and len(lines) < 2:
                 raise UserError("An exclusive market needs at least two outcomes")
             with tx() as d:
-                cur = d.execute("INSERT INTO markets(title, description, kind, b, close_at, created_at) VALUES (?,?,?,?,?,?)",
-                                (title, form.get("description", "").strip(), kind, b, parse_close_at(form.get("close_at")), now()))
-                m = d.execute("SELECT * FROM markets WHERE id = ?", (cur.lastrowid,)).fetchone()
+                m = d.execute("INSERT INTO markets(title, description, kind, b, close_at, created_at) VALUES (?,?,?,?,?,?) "
+                              "RETURNING *", (title, form.get("description", "").strip(), kind, b,
+                                              parse_close_at(form.get("close_at")), now())).fetchone()
                 add_contracts(d, m, lines)
             flash("Market created", "ok")
             return redirect(url_for("market", mid=m["id"]))

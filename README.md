@@ -2,7 +2,25 @@
 
 A private prediction market for you and your friends. You're the admin and the bank: you create markets, take people's money (Venmo, cash, whatever), credit their balances, resolve the bets and pay out withdrawals. The app keeps the books.
 
-## Run it
+## Hosting on Vercel
+
+Vercel's disk resets between requests, so the hosted app stores its data in Postgres (Neon, free tier) instead of a file.
+
+1. **Vercel → Add New → Project →** import this GitHub repo. Leave the defaults and deploy. The first deploy shows an error page saying no database is connected. That's expected.
+2. **Project → Storage → Create Database → Neon (Serverless Postgres)**. Pick the region closest to the project's functions (US East by default) and connect it to the project. This sets `DATABASE_URL`.
+3. **Deployments → ⋯ → Redeploy**.
+4. Open the site **right away** and create the admin account. The first person to visit claims it.
+
+Optional environment variables (Project → Settings → Environment Variables):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TIMEZONE` | `America/New_York` | Timezone for close times and timestamps |
+| `CORGI_SITE_NAME` | `Corgi Markets` | Name shown in the header |
+
+Tables and the login-signing key are created automatically on first start. Every push to `main` redeploys. Neon keeps point-in-time backups; you can also export the data from the Neon console.
+
+## Running locally
 
 Double-click `start.bat`, or:
 
@@ -10,19 +28,11 @@ Double-click `start.bat`, or:
 .venv\Scripts\python serve.py
 ```
 
-Open http://localhost:8000. The first visit asks you to create the **admin account**.
-
-All data lives in `data/market.db` (SQLite). **Back this file up.** It's the record of who owes what.
+Open http://localhost:8000. Without `DATABASE_URL` set, local data lives in `data/market.db` (SQLite), completely separate from the hosted site. To run locally against the hosted database instead, set `DATABASE_URL` to the Neon connection string.
 
 ## Letting friends in
 
-Your friends need a way to reach your computer. The easiest private option:
-
-- **Tailscale** (recommended): install it on your PC and invite friends to your tailnet (or share the machine). They browse to `http://<your-pc-name>:8000`. Nothing is exposed to the public internet.
-- **Cloudflare Tunnel**: `cloudflared tunnel --url http://localhost:8000` gives you a public https URL. Anyone with the link can see the login page, so use strong passwords.
-- **A small cloud VM** (Fly.io, Railway, a $5 VPS): copy the folder, `pip install -r requirements.txt`, run `python serve.py`. Use a persistent volume and set `CORGI_DATA` to point at it.
-
-Then go to **Admin → Invite friends**, create a link, and send it. Each link works once. Open the admin page through the same address your friends use before copying, so the link has the right host.
+Go to **Admin → Invite friends**, create a link, and send it. Each link works once. Copy links from the hosted site, not localhost, so they point at the right address.
 
 ## Money flow
 
