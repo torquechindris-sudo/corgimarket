@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Portfolio</h1>
+<div class="stats">
+  <div class="stat card"><span class="muted small">Cash</span><b>{{ g.user.balance|money }}</b></div>
+  <div class="stat card"><span class="muted small">Positions (at current prices)</span><b>{{ positions_value|int|money }}</b></div>
+  <div class="stat card"><span class="muted small">Total</span><b>{{ (g.user.balance + positions_value)|int|money }}</b></div>
+</div>
+
+<section class="card">
+  <h2>Open positions</h2>
+  {% if positions %}
+  <div class="scroll">
+  <table class="table">
+    <thead><tr><th>Market</th><th>Side</th><th class="num">Shares</th><th class="num">Avg</th><th class="num">Now</th><th class="num">Value</th><th class="num">P/L</th></tr></thead>
+    {% for r in positions %}
+    <tr>
+      <td><a href="{{ url_for('market', mid=r.m.id) }}">{{ r.m.title }}</a>{% if r.pos.cname != r.m.title %}<div class="muted small">{{ r.pos.cname }}</div>{% endif %}</td>
+      <td><span class="side {{ r.pos.side|lower }}">{{ r.pos.side }}</span></td>
+      <td class="num">{{ r.pos.shares|shares }}</td>
+      <td class="num">{{ r.avg|cents_price }}</td>
+      <td class="num">{{ r.price|cents_price }}</td>
+      <td class="num">{{ r.value|int|money }}</td>
+      <td class="num {{ 'pos' if r.pnl >= 0 else 'neg' }}">{{ r.pnl|int|money }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+  {% else %}<p class="muted">No open positions. <a href="{{ url_for('index') }}">Find a market</a>.</p>{% endif %}
+</section>
+
+<div class="two-col">
+  <section class="card">
+    <h2>Cash out</h2>
+    <p class="muted small">Request a withdrawal; the admin sends you the money and marks it paid. The amount is held from your balance until then.</p>
+    <form method="post" action="{{ url_for('request_withdrawal') }}" class="stack">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <label>Amount ($) <input name="amount" inputmode="decimal" required placeholder="{{ '%.2f'|format(g.user.balance / 100) }}"></label>
+      <label>Note (how to pay you) <input name="note" maxlength="200" placeholder="e.g. Venmo @me"></label>
+      <button class="btn">Request withdrawal</button>
+    </form>
+    {% if withdrawals %}
+    <table class="table small">
+      {% for w in withdrawals %}<tr><td>{{ w.created_at|when }}</td><td class="num">{{ w.cents|money }}</td><td><span class="tag {{ w.status }}">{{ w.status }}</span></td></tr>{% endfor %}
+    </table>
+    {% endif %}
+  </section>
+  <section class="card">
+    <h2>Change password</h2>
+    <form method="post" action="{{ url_for('change_password') }}" class="stack">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <label>Current <input type="password" name="current" required autocomplete="current-password"></label>
+      <label>New <input type="password" name="new" required minlength="8" autocomplete="new-password"></label>
+      <button class="btn">Change password</button>
+    </form>
+  </section>
+</div>
+
+<section class="card">
+  <h2>History</h2>
+  {% if ledger %}
+  <div class="scroll">
+  <table class="table">
+    {% for l in ledger %}
+    <tr><td class="muted small nowrap">{{ l.created_at|when }}</td><td>{{ l.note }}</td><td class="num {{ 'pos' if l.cents > 0 else 'neg' }}">{{ l.cents|money }}</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+  {% else %}<p class="muted">Nothing yet.</p>{% endif %}
+</section>
+{% endblock %}

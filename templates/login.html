@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card narrow">
+  <h1>Log in</h1>
+  <form method="post" class="stack">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <label>Username <input name="username" required autofocus autocomplete="username"></label>
+    <label>Password <input name="password" type="password" required autocomplete="current-password"></label>
+    <button class="btn primary">Log in</button>
+  </form>
+  <p class="muted small">New here? Ask the admin for an invite link.</p>
+</div>
+{% endblock %}

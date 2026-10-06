@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Leaderboard</h1>
+<section class="card">
+  <table class="table">
+    <thead><tr><th>#</th><th>Player</th><th class="num">Put in</th><th class="num">Now worth</th><th class="num">Profit</th></tr></thead>
+    {% for s in stats %}
+    <tr class="{{ 'me-row' if s.u.id == g.user.id }}">
+      <td>{{ loop.index }}</td>
+      <td><b>{{ s.u.username }}</b></td>
+      <td class="num">{{ (s.deposits + s.adjust - s.paid)|money }}</td>
+      <td class="num">{{ (s.equity + s.pending)|int|money }}</td>
+      <td class="num {{ 'pos' if s.profit >= 0 else 'neg' }}">{{ s.profit|int|money }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted small">“Now worth” = cash + open positions at current prices. Profit counts withdrawals already paid out.</p>
+</section>
+{% endblock %}

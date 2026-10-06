@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block title %}{{ m.title }} · {{ site_name }}{% endblock %}
+{% block content %}
+{% set single = contracts|length == 1 and contracts[0].name == m.title %}
+<p class="crumbs"><a href="{{ url_for('index') }}">← Markets</a></p>
+<div class="market-head">
+  <h1>{{ m.title }}</h1>
+  <div class="meta">
+    <span class="tag {{ m.kind }}">{{ 'Pick one — exactly one outcome wins' if m.kind == 'exclusive' else ('Yes / No' if single else 'Each contract resolves yes/no on its own') }}</span>
+    {% if m.status == 'resolved' %}<span class="tag done">Resolved{% if m.resolution_note %} · {{ m.resolution_note }}{% endif %}</span>
+    {% elif not is_open %}<span class="tag halted">Trading closed</span>
+    {% elif m.close_at %}<span class="muted">Closes {{ m.close_at|when }}</span>{% endif %}
+  </div>
+  {% if m.description %}<p class="desc">{{ m.description }}</p>{% endif %}
+</div>
+
+<section class="contracts">
+{% for c in contracts %}
+  {% set p = prices[c.id] %}
+  {% set tradable = is_open and c.outcome is none %}
+  <div class="contract card" data-cid="{{ c.id }}">
+    <div class="c-row">
+      <div class="c-label">
+        <div class="c-name">{{ 'Yes' if single else c.name }}</div>
+        {% if c.outcome %}
+          {% if c.outcome == 'CANCEL' %}<span class="muted small">Cancelled — bets refunded</span>
+          {% else %}<span class="outcome {{ c.outcome|lower }}">Resolved {{ c.outcome }}</span>{% endif %}
+        {% endif %}
+      </div>
+      <svg class="spark" viewBox="0 0 120 32" preserveAspectRatio="none" data-history='{{ history[c.id]|tojson }}'></svg>
+      <div class="c-price">{{ p|pct }}</div>
+      {% if tradable %}
+      <div class="c-buttons">
+        <button type="button" class="btn yes" data-open="buy" data-side="YES">Yes {{ p|cents_price }}</button>
+        <button type="button" class="btn no" data-open="buy" data-side="NO">No {{ (1 - p)|cents_price }}</button>
+      </div>
+      {% endif %}
+    </div>
+
+    {% for pos in mine.get(c.id, []) %}
+      {% set sp = p if pos.side == 'YES' else 1 - p %}
+      <div class="c-mine">
+        <span>You hold <b>{{ pos.shares|shares }} {{ pos.side }}</b>
+          <span class="muted">· avg {{ (pos.basis / 100 / pos.shares)|cents_price }} · pays {{ (pos.shares * 100)|round(0, 'floor')|int|money }} if {{ pos.side }}{% if not c.outcome %} · worth {{ (pos.shares * sp * 100)|int|money }} now{% endif %}</span></span>
+        {% if tradable %}<button type="button" class="btn small ghost" data-open="sell" data-side="{{ pos.side }}" data-max="{{ pos.shares }}">Sell</button>{% endif %}
+      </div>
+    {% endfor %}
+
+    {% if tradable %}
+    <form class="trade-form" method="post" action="{{ url_for('trade') }}" hidden>
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="contract_id" value="{{ c.id }}">
+      <input type="hidden" name="side">
+      <input type="hidden" name="action">
+      <div class="tf-row">
+        <span class="tf-title"></span>
+        <label class="tf-amount">$ <input name="amount" inputmode="decimal" placeholder="10.00" autocomplete="off"></label>
+        <label class="tf-shares">Shares <input name="shares" inputmode="decimal" autocomplete="off">
+          <button type="button" class="btn small ghost" data-max-btn>Max</button></label>
+        <button class="btn primary tf-submit">Confirm</button>
+        <button type="button" class="btn ghost" data-cancel>Cancel</button>
+      </div>
+      <div class="quote muted small"></div>
+    </form>
+    {% endif %}
+
+    {% if g.user.is_admin %}
+    <div class="admin-row small">
+      <span class="muted">Held: {{ (holders.get((c.id, 'YES'), 0))|shares }} YES · {{ (holders.get((c.id, 'NO'), 0))|shares }} NO</span>
+      {% if m.kind == 'independent' and not c.outcome %}
+        <form method="post" action="{{ url_for('admin_market_action', mid=m.id, action='resolve_contract') }}" class="inline"
+              data-confirm="Resolve “{{ c.name }}”? Payouts are sent immediately and can't be undone.">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <input type="hidden" name="contract_id" value="{{ c.id }}">
+          <span class="muted">Resolve:</span>
+          <button name="outcome" value="YES" class="btn small yes">YES</button>
+          <button name="outcome" value="NO" class="btn small no">NO</button>
+          <button name="outcome" value="CANCEL" class="btn small ghost">Cancel &amp; refund</button>
+        </form>
+      {% endif %}
+      {% if not single %}
+      <details class="inline-details">
+        <summary class="muted">Rename</summary>
+        <form method="post" action="{{ url_for('admin_market_action', mid=m.id, action='rename') }}" class="inline">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <input type="hidden" name="contract_id" value="{{ c.id }}">
+          <input name="name" value="{{ c.name }}" required>
+          <button class="btn small">Save</button>
+        </form>
+      </details>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+{% endfor %}
+</section>
+
+{% if g.user.is_admin %}
+<section class="card admin-panel">
+  <h2>Admin controls</h2>
+  <div class="admin-grid">
+    {% if m.status != 'resolved' %}
+    <div>
+      <h3>Add contracts</h3>
+      <form method="post" action="{{ url_for('admin_market_action', mid=m.id, action='add') }}" class="stack">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <textarea name="contracts" rows="3" placeholder="One per line. Optional starting chance:&#10;Alice | 20%&#10;Bob"></textarea>
+        {% if m.kind == 'exclusive' %}<p class="muted small">New outcomes take their share proportionally from the existing ones (default: an equal share).</p>{% endif %}
+        <button class="btn">Add</button>
+      </form>
+    </div>
+    <div>
+      <h3>Trading</h3>
+      <form method="post" action="{{ url_for('admin_market_action', mid=m.id, action='close' if m.status == 'open' else 'reopen') }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="btn">{{ 'Halt trading' if m.status == 'open' else 'Reopen trading' }}</button>
+      </form>
+      {% if m.kind == 'exclusive' %}
+      <h3>Resolve</h3>
+      <form method="post" action="{{ url_for('admin_market_action', mid=m.id, action='resolve_winner') }}" class="stack"
+            data-confirm="Resolve this market? Payouts are sent immediately and can't be undone.">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <select name="winner" required>
+          <option value="">Choose the winner…</option>
+          {% for c in contracts %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+        </select>
+        <button class="btn primary">Resolve &amp; pay out</button>
+      </form>
+      {% endif %}
+      <form method="post" action="{{ url_for('admin_market_action', mid=m.id, action='cancel') }}"
+            data-confirm="Cancel the whole market? Everyone's net spend on every open contract is reversed.">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="btn ghost danger">Cancel market &amp; refund all</button>
+      </form>
+    </div>
+    {% endif %}
+    <div>
+      <h3>Edit</h3>
+      <form method="post" action="{{ url_for('admin_market_action', mid=m.id, action='edit') }}" class="stack">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <input name="title" value="{{ m.title }}" required>
+        <textarea name="description" rows="3" placeholder="Description / resolution criteria">{{ m.description }}</textarea>
+        {% if m.status != 'resolved' %}
+        <label class="small">Closes at <input type="datetime-local" name="close_at" value="{{ (m.close_at or '')[:16].replace(' ', 'T') }}"></label>
+        {% endif %}
+        <button class="btn">Save</button>
+      </form>
+      <p class="muted small">Liquidity b = {{ m.b|round(1) }}</p>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Activity</h2>
+  {% if trades %}
+  <table class="table">
+    {% for t in trades %}
+    <tr>
+      <td><b>{{ t.username }}</b> {{ 'bought' if t.action == 'buy' else 'sold' }}
+        <span class="side {{ t.side|lower }}">{{ t.side }}</span>{% if not single %} on {{ t.cname }}{% endif %}</td>
+      <td class="num">{{ t.cents|abs|money }}</td>
+      <td class="num muted">{{ t.price_before|pct }} → {{ t.price_after|pct }}</td>
+      <td class="num muted small">{{ t.created_at|when }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">No trades yet. Be the first.</p>{% endif %}
+</section>
+{% endblock %}

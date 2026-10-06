@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% macro market_card(r) %}
+  {% set m = r.m %}
+  <a class="card market-card" href="{{ url_for('market', mid=m.id) }}">
+    <div class="mc-head">
+      <h3>{{ m.title }}</h3>
+      <span class="tag {{ m.kind }}">{{ 'Pick one' if m.kind == 'exclusive' else ('Yes / No' if r.contracts|length == 1 else 'Multi yes/no') }}</span>
+    </div>
+    <ul class="mc-list">
+      {% for c, p in r.contracts[:4] %}
+        <li>
+          <span class="mc-name">{{ c.name if not (r.contracts|length == 1 and c.name == m.title) else 'Yes' }}</span>
+          {% if c.outcome == 'CANCEL' %}<span class="muted">cancelled</span>
+          {% elif c.outcome %}<span class="outcome {{ c.outcome|lower }}">{{ c.outcome }}</span>
+          {% else %}<span class="bar"><span style="width: {{ (p * 100)|round(1) }}%"></span></span><b>{{ p|pct }}</b>{% endif %}
+        </li>
+      {% endfor %}
+      {% if r.contracts|length > 4 %}<li class="muted small">+ {{ r.contracts|length - 4 }} more</li>{% endif %}
+    </ul>
+    <div class="mc-foot muted small">
+      <span>{{ r.volume|money }} traded</span>
+      {% if m.status == 'resolved' %}<span>{{ m.resolution_note or 'Resolved' }}</span>
+      {% elif m.close_at %}<span>{{ 'Closes' if market_open(m) else 'Closed' }} {{ m.close_at|when }}</span>
+      {% elif m.status == 'closed' %}<span>Trading halted</span>{% endif %}
+    </div>
+  </a>
+{% endmacro %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Markets</h1>
+  {% if g.user.is_admin %}<a class="btn primary" href="{{ url_for('admin_new_market') }}">+ New market</a>{% endif %}
+</div>
+
+{% if not open_markets and not closed_markets and not resolved_markets %}
+  <div class="card empty">
+    <p>No markets yet.</p>
+    {% if g.user.is_admin %}<p><a class="btn primary" href="{{ url_for('admin_new_market') }}">Create the first one</a></p>{% endif %}
+  </div>
+{% endif %}
+
+{% if g.user.balance == 0 and not g.user.is_admin %}
+  <div class="flash info">Your balance is $0. Send money to the admin and they'll credit your account.</div>
+{% endif %}
+
+{% if open_markets %}
+<section class="grid">{% for r in open_markets %}{{ market_card(r) }}{% endfor %}</section>
+{% endif %}
+
+{% if closed_markets %}
+<h2 class="section">Awaiting resolution</h2>
+<section class="grid">{% for r in closed_markets %}{{ market_card(r) }}{% endfor %}</section>
+{% endif %}
+
+{% if resolved_markets %}
+<details class="section"{% if not open_markets %} open{% endif %}>
+  <summary><h2>Resolved ({{ resolved_markets|length }})</h2></summary>
+  <section class="grid">{% for r in resolved_markets %}{{ market_card(r) }}{% endfor %}</section>
+</details>
+{% endif %}
+{% endblock %}

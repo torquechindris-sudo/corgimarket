@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="crumbs"><a href="{{ url_for('admin') }}">← Admin</a></p>
+<h1>New market</h1>
+<form method="post" class="card stack new-market" id="new-market">
+  <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+
+  <label>Question / title
+    <input name="title" required maxlength="200" value="{{ form.title }}" placeholder="Will Sam finish the marathon?  ·  Who wins fantasy league?">
+  </label>
+
+  <fieldset class="kinds">
+    <legend>Type</legend>
+    <label class="kind">
+      <input type="radio" name="kind" value="independent" {{ 'checked' if form.get('kind', 'independent') == 'independent' }}>
+      <span><b>Yes / No</b><br><span class="muted small">One question, or a list of separate yes/no contracts that each resolve on their own (e.g. “Who will show up?” — any number can be YES).</span></span>
+    </label>
+    <label class="kind">
+      <input type="radio" name="kind" value="exclusive" {{ 'checked' if form.kind == 'exclusive' }}>
+      <span><b>Pick one</b><br><span class="muted small">Several outcomes, exactly one wins. Prices always add to 100% (e.g. “Who wins the league?”).</span></span>
+    </label>
+  </fieldset>
+
+  <label>Contracts / outcomes <span class="muted small">— one per line, optional starting chance after a <code>|</code></span>
+    <textarea name="contracts" rows="6" placeholder="Leave empty for a single yes/no question.&#10;&#10;Alice | 40%&#10;Bob | 35&#10;Carol">{{ form.contracts }}</textarea>
+  </label>
+
+  <label>Description &amp; resolution rules <span class="muted small">(optional)</span>
+    <textarea name="description" rows="3" placeholder="Resolves YES if … Source of truth: …">{{ form.description }}</textarea>
+  </label>
+
+  <div class="two-col">
+    <label>Trading closes <span class="muted small">(optional)</span>
+      <input type="datetime-local" name="close_at" value="{{ form.close_at }}">
+    </label>
+    <label>Liquidity (b)
+      <input name="b" type="number" min="1" step="1" value="{{ form.b or 20 }}">
+    </label>
+  </div>
+  <p class="muted small" id="liq-help">
+    Higher liquidity = prices move less per dollar, but more house money at risk.
+    <span id="liq-calc"></span>
+  </p>
+
+  <button class="btn primary">Create market</button>
+</form>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  const f = document.getElementById('new-market'), out = document.getElementById('liq-calc');
+  function update() {
+    const b = parseFloat(f.b.value) || 0, kind = f.kind.value;
+    const lines = f.contracts.value.split('\n').map(s => s.trim()).filter(Boolean);
+    const probs = lines.map(l => { const m = l.match(/\|\s*([\d.]+)\s*%?\s*$/); return m ? Math.min(Math.max(+m[1] / 100, .01), .99) : null; });
+    let risk;
+    if (kind === 'exclusive') {
+      const n = Math.max(probs.length, 2), given = probs.filter(p => p != null).reduce((a, b) => a + b, 0);
+      const blanks = probs.filter(p => p == null).length;
+      const fill = blanks ? Math.max(1 - given, .01 * blanks) / blanks : 0;
+      const all = probs.length ? probs.map(p => p ?? fill) : Array(n).fill(1 / n);
+      const tot = all.reduce((a, b) => a + b, 0);
+      risk = b * Math.log(tot / Math.min(...all));
+    } else {
+      const ps = probs.length ? probs.map(p => p ?? .5) : [.5];
+      risk = ps.reduce((a, p) => a + b * Math.log(1 / Math.min(p, 1 - p)), 0);
+    }
+    const q = b * Math.log1p(Math.expm1(10 / b) / .5), moved = 1 / (1 + Math.exp(-q / b));
+    out.textContent = b > 0 ? `Max house subsidy ≈ $${risk.toFixed(2)}. A $10 bet on a 50% contract moves it to ${(moved * 100).toFixed(0)}%.` : '';
+  }
+  f.addEventListener('input', update); update();
+})();
+</script>
+{% endblock %}

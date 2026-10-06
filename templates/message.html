@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card narrow">
+  <h1>{{ title }}</h1>
+  <p class="muted">{{ body }}</p>
+  <p><a href="{{ url_for('index') }}">← Back to markets</a></p>
+</div>
+{% endblock %}

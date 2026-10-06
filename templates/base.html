@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ site_name }}{% endblock %}</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐕</text></svg>">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="{{ url_for('index') }}">🐕 {{ site_name }}</a>
+      {% if g.user %}
+      <nav>
+        <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint in ('index','market') }}">Markets</a>
+        <a href="{{ url_for('portfolio') }}" class="{{ 'active' if request.endpoint == 'portfolio' }}">Portfolio</a>
+        <a href="{{ url_for('leaderboard') }}" class="{{ 'active' if request.endpoint == 'leaderboard' }}">Leaderboard</a>
+        {% if g.user.is_admin %}<a href="{{ url_for('admin') }}" class="{{ 'active' if request.endpoint.startswith('admin') }}">Admin</a>{% endif %}
+      </nav>
+      <div class="me">
+        <a class="balance" href="{{ url_for('portfolio') }}" title="Cash balance">{{ g.user.balance|money }}</a>
+        <form method="post" action="{{ url_for('logout') }}">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <button class="linkish" title="Log out {{ g.user.username }}">Log out</button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+  </header>
+  <main class="wrap">
+    {% for cat, msg in get_flashed_messages(with_categories=true) %}
+      <div class="flash {{ cat }}">{{ msg }}</div>
+    {% endfor %}
+    {% block content %}{% endblock %}
+  </main>
+  <script>window.CSRF = "{{ csrf_token() }}";</script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

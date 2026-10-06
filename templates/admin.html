@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <h1>Admin</h1>
+  <a class="btn primary" href="{{ url_for('admin_new_market') }}">+ New market</a>
+</div>
+
+<div class="stats">
+  <div class="stat card"><span class="muted small">Cash you hold</span><b>{{ summary.cash|money }}</b><span class="muted small">deposits − paid withdrawals</span></div>
+  <div class="stat card"><span class="muted small">Owed to players</span><b>{{ summary.owed|money }}</b><span class="muted small">balances + pending withdrawals</span></div>
+  <div class="stat card"><span class="muted small">House result if all open bets resolve…</span>
+    <b class="{{ 'pos' if summary.house_expected >= 0 else 'neg' }}">{{ summary.house_expected|int|money }}</b>
+    <span class="muted small">at current odds · worst case <span class="{{ 'pos' if summary.house_worst >= 0 else 'neg' }}">{{ summary.house_worst|int|money }}</span></span></div>
+</div>
+<p class="muted small">You're the bank: the market maker is funded by your cash. Max subsidy per market is bounded by its liquidity setting. Negative house numbers mean players are up overall.</p>
+
+{% if withdrawals %}
+<section class="card highlight">
+  <h2>Pending withdrawals</h2>
+  <table class="table">
+    {% for w in withdrawals %}
+    <tr>
+      <td><b>{{ w.username }}</b> <span class="muted small">{{ w.created_at|when }}</span>{% if w.note %}<div class="small">{{ w.note }}</div>{% endif %}</td>
+      <td class="num"><b>{{ w.cents|money }}</b></td>
+      <td class="num nowrap">
+        <form method="post" action="{{ url_for('admin_withdrawal', wid=w.id, action='paid') }}" class="inline" data-confirm="Mark {{ w.cents|money }} to {{ w.username }} as paid? Send the money first.">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="btn small primary">Mark paid</button></form>
+        <form method="post" action="{{ url_for('admin_withdrawal', wid=w.id, action='reject') }}" class="inline" data-confirm="Reject and return {{ w.cents|money }} to {{ w.username }}'s balance?">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="btn small ghost">Reject</button></form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</section>
+{% endif %}
+
+<section class="card" id="players">
+  <h2>Players</h2>
+  <div class="scroll">
+  <table class="table">
+    <thead><tr><th>Player</th><th class="num">Balance</th><th class="num">In positions</th><th class="num">Deposited</th><th class="num">Withdrawn</th><th class="num">Profit</th><th></th></tr></thead>
+    {% for s in stats %}
+    <tr>
+      <td><b>{{ s.u.username }}</b>{% if s.u.is_admin %} <span class="tag">admin</span>{% endif %}</td>
+      <td class="num">{{ s.u.balance|money }}</td>
+      <td class="num">{{ s.value|int|money }}</td>
+      <td class="num">{{ s.deposits|money }}</td>
+      <td class="num">{{ (s.paid + s.pending)|money }}</td>
+      <td class="num {{ 'pos' if s.profit >= 0 else 'neg' }}">{{ s.profit|int|money }}</td>
+      <td class="nowrap">
+        <details class="inline-details right">
+          <summary class="btn small">Money</summary>
+          <form method="post" action="{{ url_for('admin_money', uid=s.u.id) }}" class="popover stack">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <select name="kind">
+              <option value="deposit">Deposit — they paid you</option>
+              <option value="withdraw">Cash out — you paid them</option>
+              <option value="adjust">Adjust (bonus / correction, ± no cash)</option>
+            </select>
+            <input name="amount" inputmode="decimal" placeholder="Amount, e.g. 20" required>
+            <input name="note" placeholder="Note (e.g. Venmo 10/6)">
+            <button class="btn primary">Record</button>
+          </form>
+        </details>
+        <details class="inline-details right">
+          <summary class="btn small ghost">Reset pw</summary>
+          <form method="post" action="{{ url_for('admin_reset_password', uid=s.u.id) }}" class="popover stack">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <input name="password" placeholder="Temporary password (8+ chars)" minlength="8" required>
+            <button class="btn">Set password</button>
+          </form>
+        </details>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+</section>
+
+<section class="card" id="invites">
+  <h2>Invite friends</h2>
+  <form method="post" action="{{ url_for('admin_invite') }}" class="inline">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <input name="note" placeholder="Who is it for? (optional)" maxlength="80">
+    <button class="btn primary">Create invite link</button>
+  </form>
+  {% if invites %}
+  <table class="table">
+    {% for i in invites %}
+    {% set link = url_for('join', code=i.code, _external=True) %}
+    <tr>
+      <td>{{ i.note or '—' }}</td>
+      <td><input class="copy" readonly value="{{ link }}" onclick="this.select()"></td>
+      <td class="nowrap">
+        <button type="button" class="btn small" data-copy="{{ link }}">Copy</button>
+        <form method="post" action="{{ url_for('admin_revoke_invite', code=i.code) }}" class="inline">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="btn small ghost">Revoke</button></form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted small">Each link works once. Links use the address you're browsing from — if friends connect through a tunnel or Tailscale, open this page through that same address before copying.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Money log</h2>
+  <p class="muted small">Deposits, withdrawals, payouts, refunds and adjustments (trades are on each market page).</p>
+  {% if ledger %}
+  <div class="scroll">
+  <table class="table">
+    {% for l in ledger %}
+    <tr><td class="muted small nowrap">{{ l.created_at|when }}</td><td><b>{{ l.username }}</b></td><td><span class="tag">{{ l.kind.replace('_', ' ') }}</span></td><td>{{ l.note }}</td><td class="num {{ 'pos' if l.cents > 0 else 'neg' }}">{{ l.cents|money }}</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+  {% else %}<p class="muted">Nothing yet.</p>{% endif %}
+</section>
+{% endblock %}
